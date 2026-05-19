@@ -1,48 +1,73 @@
 name: build-firmware
 
 on:
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch, tag, or SHA to build'
+        description: 'Branch, tag, or SHA to build (default: latest main)'
         required: false
-        default: 'main'
-  repository_dispatch:
-    types: [firmware-push]
+        default: ''
 
 jobs:
-  setup:
+  check:
     runs-on: ubuntu-latest
     outputs:
-      ref: ${{ steps.resolve.outputs.ref }}
-      short_sha: ${{ steps.resolve.outputs.short_sha }}
-      tag: ${{ steps.resolve.outputs.tag }}
-      environments: ${{ steps.list.outputs.environments }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+      ref: ${{ steps.compare.outputs.ref }}
+      short_sha: ${{ steps.compare.outputs.short_sha }}
+      tag: ${{ steps.compare.outputs.tag }}
     steps:
-      - name: Resolve ref
-        id: resolve
+      - name: Check for new commits
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            REF="${{ github.event.client_payload.sha }}"
-            SOURCE_REF="${{ github.event.client_payload.source_ref }}"
-          else
+          # Resolve the ref to build
+          if [[ -n "${{ inputs.ref }}" ]]; then
             REF="${{ inputs.ref }}"
-            SOURCE_REF="$REF"
+          else
+            REF=$(curl -sf https://api.github.com/repos/maxexcloo/trmnl-firmware/commits/main | jq -r '.sha')
           fi
           SHORT="${REF:0:7}"
+
+          # Find the last successfully built SHA from existing releases
+          LAST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 50 --json tagName \
+            | jq -r '[.[] | .tagName | select(startswith("build-"))] | first // ""')
+          LAST_SHORT="${LAST_TAG#build-}"
+
+          echo "Current SHA: $SHORT  Last built: $LAST_SHORT"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "$SHORT" != "$LAST_SHORT" ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
           echo "ref=$REF" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT" >> $GITHUB_OUTPUT
-          # Use tag name for tag pushes, short SHA otherwise
-          if [[ "$SOURCE_REF" == refs/tags/* ]]; then
-            echo "tag=${SOURCE_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+          # Use a tag name if the ref points to a tag, otherwise use short SHA
+          TAG_NAME=$(curl -sf "https://api.github.com/repos/maxexcloo/trmnl-firmware/git/refs/tags" \
+            | jq -r --arg sha "$REF" '.[] | select(.object.sha == $sha) | .ref | ltrimstr("refs/tags/")' | head -1)
+          if [[ -n "$TAG_NAME" ]]; then
+            echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
           else
             echo "tag=build-$SHORT" >> $GITHUB_OUTPUT
           fi
 
+  list-targets:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.list.outputs.environments }}
+    steps:
       - uses: actions/checkout@v4
         with:
           repository: maxexcloo/trmnl-firmware
-          ref: ${{ steps.resolve.outputs.ref }}
+          ref: ${{ needs.check.outputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -53,18 +78,19 @@ jobs:
         run: echo "environments=$(python3 scripts/list_build_envs.py)" >> $GITHUB_OUTPUT
 
   build:
-    needs: setup
+    needs: [check, list-targets]
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+        environment: ${{ fromJson(needs.list-targets.outputs.environments) }}
     steps:
       - uses: actions/checkout@v4
         with:
           repository: maxexcloo/trmnl-firmware
-          ref: ${{ needs.setup.outputs.ref }}
+          ref: ${{ needs.check.outputs.ref }}
 
       - uses: actions/cache@v4
         with:
@@ -105,7 +131,8 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [setup, build]
+    needs: [check, build]
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -129,9 +156,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.setup.outputs.tag }}"
-          SHORT="${{ needs.setup.outputs.short_sha }}"
-          # pre-release for SHA builds, proper release for tags
+          TAG="${{ needs.check.outputs.tag }}"
+          SHORT="${{ needs.check.outputs.short_sha }}"
           if [[ "$TAG" == build-* ]]; then
             PRERELEASE="--prerelease"
           else
@@ -140,6 +166,6 @@ jobs:
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --title "$TAG" \
-            --notes "Built from [maxexcloo/trmnl-firmware@${SHORT}](https://github.com/maxexcloo/trmnl-firmware/commit/${{ needs.setup.outputs.ref }})" \
+            --notes "Built from [maxexcloo/trmnl-firmware@${SHORT}](https://github.com/maxexcloo/trmnl-firmware/commit/${{ needs.check.outputs.ref }})" \
             $PRERELEASE \
             release/*.bin
