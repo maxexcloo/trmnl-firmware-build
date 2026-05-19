@@ -1,0 +1,145 @@
+name: build-firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or SHA to build'
+        required: false
+        default: 'main'
+  repository_dispatch:
+    types: [firmware-push]
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      environments: ${{ steps.list.outputs.environments }}
+    steps:
+      - name: Resolve ref
+        id: resolve
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            REF="${{ github.event.client_payload.sha }}"
+            SOURCE_REF="${{ github.event.client_payload.source_ref }}"
+          else
+            REF="${{ inputs.ref }}"
+            SOURCE_REF="$REF"
+          fi
+          SHORT="${REF:0:7}"
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT" >> $GITHUB_OUTPUT
+          # Use tag name for tag pushes, short SHA otherwise
+          if [[ "$SOURCE_REF" == refs/tags/* ]]; then
+            echo "tag=${SOURCE_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=build-$SHORT" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: maxexcloo/trmnl-firmware
+          ref: ${{ steps.resolve.outputs.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: List environments
+        id: list
+        run: echo "environments=$(python3 scripts/list_build_envs.py)" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: maxexcloo/trmnl-firmware
+          ref: ${{ needs.setup.outputs.ref }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.buildcache
+          key: ubuntu-pio-${{ matrix.environment }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ubuntu-pio-${{ matrix.environment }}-
+            ubuntu-pio-
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ubuntu-ccache-${{ matrix.environment }}-${{ hashFiles('platformio.ini') }}
+          job-summary: ''
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Configure ccache
+        run: echo "PLATFORMIO_BUILD_CACHE_DIR=$HOME/.buildcache" >> $GITHUB_ENV
+
+      - name: Build ${{ matrix.environment }}
+        run: pio run -e ${{ matrix.environment }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.environment }}
+          path: .pio/build/${{ matrix.environment }}/firmware.bin
+          retention-days: 7
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: firmware/
+
+      - name: Rename binaries
+        run: |
+          mkdir -p release/
+          for dir in firmware/firmware-*/; do
+            env="${dir#firmware/firmware-}"
+            env="${env%/}"
+            cp "$dir/firmware.bin" "release/${env}.bin"
+          done
+          ls -la release/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.setup.outputs.tag }}"
+          SHORT="${{ needs.setup.outputs.short_sha }}"
+          # pre-release for SHA builds, proper release for tags
+          if [[ "$TAG" == build-* ]]; then
+            PRERELEASE="--prerelease"
+          else
+            PRERELEASE=""
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --notes "Built from [maxexcloo/trmnl-firmware@${SHORT}](https://github.com/maxexcloo/trmnl-firmware/commit/${{ needs.setup.outputs.ref }})" \
+            $PRERELEASE \
+            release/*.bin

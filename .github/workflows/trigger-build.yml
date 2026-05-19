@@ -1,0 +1,23 @@
+name: trigger-build
+
+# Add this workflow to your maxexcloo/trmnl-firmware fork.
+# It fires the build repo's workflow on every push/tag.
+# Requires a secret BUILD_REPO_PAT: a fine-grained PAT with
+# Actions: write permission on maxexcloo/trmnl-firmware-build.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['**']
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to build repo
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_REPO_PAT }}
+        run: |
+          gh workflow run build.yml \
+            --repo maxexcloo/trmnl-firmware-build \
+            --field ref=${{ github.sha }}
