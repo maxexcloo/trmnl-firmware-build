@@ -69,7 +69,7 @@ jobs:
           repository: maxexcloo/trmnl-firmware
           ref: ${{ needs.check.outputs.ref }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -110,7 +110,7 @@ jobs:
           key: ubuntu-ccache-${{ matrix.environment }}-${{ hashFiles('platformio.ini') }}
           job-summary: ''
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
