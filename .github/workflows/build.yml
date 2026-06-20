@@ -64,7 +64,7 @@ jobs:
     outputs:
       environments: ${{ steps.list.outputs.environments }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: maxexcloo/trmnl-firmware
           ref: ${{ needs.check.outputs.ref }}
@@ -87,7 +87,7 @@ jobs:
       matrix:
         environment: ${{ fromJson(needs.list-targets.outputs.environments) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: maxexcloo/trmnl-firmware
           ref: ${{ needs.check.outputs.ref }}
