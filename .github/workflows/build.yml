@@ -92,7 +92,7 @@ jobs:
           repository: maxexcloo/trmnl-firmware
           ref: ${{ needs.check.outputs.ref }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cache/pip
